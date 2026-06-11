@@ -1,0 +1,7 @@
+config/client_secret.json
+config/token.json
+config/accounts/
+config/cache/
+google-automation
+dist/
+coverage.out
