@@ -106,6 +106,12 @@ Multiple Google account logins are stored under:
 
 The active account is used by Google API commands unless `--token-file` is provided.
 
+## Security
+
+Users must provide their own Google OAuth client credentials. Do not commit OAuth
+client secrets, access tokens, refresh tokens, account files, cache databases, or
+other files from `~/.automation/google/`.
+
 ## Local cache
 
 Commands can use a local SQLite cache where the Google API supports it. The global defaults are:
@@ -185,3 +191,7 @@ go run . gmail addresses export --workers 4 --output addresses.csv
 ```
 
 Note: Google rejected the Keep API scope for this OAuth client with `invalid_scope`, so Keep is not included in the default login bundle.
+
+## License
+
+MIT
