@@ -41,7 +41,15 @@ func NewClient(ctx context.Context, cfg Config) (*http.Client, error) {
 		return nil, err
 	}
 
-	return oauthConfig.Client(ctx, token), nil
+	source := oauthConfig.TokenSource(ctx, token)
+	if cfg.TokenFile != "" {
+		source = &persistingTokenSource{
+			source: source,
+			path:   cfg.TokenFile,
+			last:   token,
+		}
+	}
+	return oauth2.NewClient(ctx, source), nil
 }
 
 func Token(ctx context.Context, cfg Config) (*oauth2.Token, error) {
@@ -289,4 +297,42 @@ func saveToken(path string, token *oauth2.Token) error {
 	}
 
 	return nil
+}
+
+type persistingTokenSource struct {
+	source oauth2.TokenSource
+	path   string
+	last   *oauth2.Token
+}
+
+func (s *persistingTokenSource) Token() (*oauth2.Token, error) {
+	token, err := s.source.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tokenNeedsSave(s.last, token) {
+		if s.last != nil && token.RefreshToken == "" {
+			clone := *token
+			clone.RefreshToken = s.last.RefreshToken
+			token = &clone
+		}
+		if err := saveToken(s.path, token); err != nil {
+			return nil, err
+		}
+	}
+	s.last = token
+	return token, nil
+}
+
+func tokenNeedsSave(oldToken, newToken *oauth2.Token) bool {
+	if newToken == nil {
+		return false
+	}
+	if oldToken == nil {
+		return true
+	}
+	return oldToken.AccessToken != newToken.AccessToken ||
+		oldToken.RefreshToken != newToken.RefreshToken ||
+		!oldToken.Expiry.Equal(newToken.Expiry) ||
+		oldToken.TokenType != newToken.TokenType
 }

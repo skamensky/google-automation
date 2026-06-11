@@ -243,22 +243,166 @@ func newGmailAddressesCommand(cfg *appConfig) *cobra.Command {
 func newGmailDraftsCommand(cfg *appConfig) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "drafts",
-		Short: "Create Gmail drafts",
+		Short: "Manage Gmail drafts",
 	}
 
-	var to []string
-	var cc []string
-	var bcc []string
-	var subject string
-	var bodyFile string
-	var threadID string
-	var inReplyTo string
-	var references string
+	cmd.AddCommand(newGmailDraftsListCommand(cfg))
+	cmd.AddCommand(newGmailDraftsGetCommand(cfg))
+	cmd.AddCommand(newGmailDraftsDeleteCommand(cfg))
+	cmd.AddCommand(newGmailDraftsCreateCommand(cfg))
+	cmd.AddCommand(newGmailDraftsUpdateCommand(cfg))
+	cmd.AddCommand(newGmailDraftsReplyCommand(cfg))
 
-	create := &cobra.Command{
+	return cmd
+}
+
+func newGmailDraftsListCommand(cfg *appConfig) *cobra.Command {
+	var limit int64
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List Gmail drafts",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, ctx, err := newGmailClient(cmd, cfg)
+			if err != nil {
+				return err
+			}
+			drafts, err := client.ListDrafts(ctx, limit)
+			if err != nil {
+				return err
+			}
+			if cfg.jsonOutput {
+				return googlegmail.WriteJSON(cmd.OutOrStdout(), drafts)
+			}
+			for _, draft := range drafts {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\t%s\n", draft.ID, draft.MessageID, draft.ThreadID, draft.Subject)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().Int64Var(&limit, "limit", 25, "maximum drafts to return")
+	return cmd
+}
+
+func newGmailDraftsGetCommand(cfg *appConfig) *cobra.Command {
+	var format string
+	var output string
+	cmd := &cobra.Command{
+		Use:   "get DRAFT_ID",
+		Short: "Get a Gmail draft",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, ctx, err := newGmailClient(cmd, cfg)
+			if err != nil {
+				return err
+			}
+			draft, err := client.GetDraft(ctx, args[0], format)
+			if err != nil {
+				return err
+			}
+			if output != "" {
+				return googlegmail.WriteJSONFile(output, draft)
+			}
+			return googlegmail.WriteJSON(cmd.OutOrStdout(), draft)
+		},
+	}
+	cmd.Flags().StringVar(&format, "format", "metadata", "draft format: metadata, full, minimal, raw")
+	cmd.Flags().StringVarP(&output, "output", "o", "", "write draft JSON to file")
+	return cmd
+}
+
+func newGmailDraftsDeleteCommand(cfg *appConfig) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "delete DRAFT_ID",
+		Short: "Delete a Gmail draft",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, ctx, err := newGmailClient(cmd, cfg)
+			if err != nil {
+				return err
+			}
+			if err := client.DeleteDraft(ctx, args[0]); err != nil {
+				return err
+			}
+			if cfg.jsonOutput {
+				return googlegmail.WriteJSON(cmd.OutOrStdout(), map[string]string{"deleted": args[0]})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "deleted\t%s\n", args[0])
+			return nil
+		},
+	}
+	return cmd
+}
+
+func newGmailDraftsCreateCommand(cfg *appConfig) *cobra.Command {
+	opts := draftFlags{}
+	var replaceThreadDraft bool
+	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a Gmail draft",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			draftOpts, err := opts.toDraftOptions()
+			if err != nil {
+				return err
+			}
+			client, ctx, err := newGmailClient(cmd, cfg)
+			if err != nil {
+				return err
+			}
+			var draft *googlegmail.DraftInfo
+			if replaceThreadDraft {
+				draft, err = client.CreateOrReplaceThreadDraft(ctx, draftOpts)
+			} else {
+				draft, err = client.CreateDraft(ctx, draftOpts)
+			}
+			if err != nil {
+				return err
+			}
+			return writeDraftInfo(cmd, cfg, draft)
+		},
+	}
+	opts.addFlags(cmd)
+	cmd.Flags().BoolVar(&replaceThreadDraft, "replace-thread-draft", false, "update the first existing draft in --thread-id and delete duplicate drafts")
+	return cmd
+}
+
+func newGmailDraftsUpdateCommand(cfg *appConfig) *cobra.Command {
+	opts := draftFlags{}
+	cmd := &cobra.Command{
+		Use:   "update DRAFT_ID",
+		Short: "Update a Gmail draft",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			draftOpts, err := opts.toDraftOptions()
+			if err != nil {
+				return err
+			}
+			client, ctx, err := newGmailClient(cmd, cfg)
+			if err != nil {
+				return err
+			}
+			draft, err := client.UpdateDraft(ctx, args[0], draftOpts)
+			if err != nil {
+				return err
+			}
+			return writeDraftInfo(cmd, cfg, draft)
+		},
+	}
+	opts.addFlags(cmd)
+	return cmd
+}
+
+func newGmailDraftsReplyCommand(cfg *appConfig) *cobra.Command {
+	var bodyFile string
+	var replyAll bool
+	var replaceExisting bool
+	var to []string
+	var cc []string
+	var bcc []string
+	cmd := &cobra.Command{
+		Use:   "reply THREAD_ID",
+		Short: "Create a reply draft for the latest non-draft message in a thread",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if bodyFile == "" {
 				return fmt.Errorf("--body-file is required")
 			}
@@ -270,37 +414,78 @@ func newGmailDraftsCommand(cfg *appConfig) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			draft, err := client.CreateDraft(ctx, googlegmail.DraftOptions{
-				To:         to,
-				Cc:         cc,
-				Bcc:        bcc,
-				Subject:    subject,
-				Body:       string(body),
-				ThreadID:   threadID,
-				InReplyTo:  inReplyTo,
-				References: references,
+			draft, err := client.CreateReplyDraft(ctx, googlegmail.ReplyDraftOptions{
+				ThreadID:        args[0],
+				Body:            string(body),
+				ReplyAll:        replyAll,
+				ReplaceExisting: replaceExisting,
+				To:              to,
+				Cc:              cc,
+				Bcc:             bcc,
 			})
 			if err != nil {
 				return err
 			}
-			if cfg.jsonOutput {
-				return googlegmail.WriteJSON(cmd.OutOrStdout(), draft)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\n", draft.ID, draft.MessageID, draft.ThreadID)
-			return nil
+			return writeDraftInfo(cmd, cfg, draft)
 		},
 	}
-	create.Flags().StringSliceVar(&to, "to", nil, "recipient address, repeatable or comma-separated")
-	create.Flags().StringSliceVar(&cc, "cc", nil, "cc address, repeatable or comma-separated")
-	create.Flags().StringSliceVar(&bcc, "bcc", nil, "bcc address, repeatable or comma-separated")
-	create.Flags().StringVar(&subject, "subject", "", "draft subject")
-	create.Flags().StringVar(&bodyFile, "body-file", "", "plain text draft body file")
-	create.Flags().StringVar(&threadID, "thread-id", "", "Gmail thread ID for reply drafts")
-	create.Flags().StringVar(&inReplyTo, "in-reply-to", "", "Message-ID value for In-Reply-To")
-	create.Flags().StringVar(&references, "references", "", "References header value")
-	cmd.AddCommand(create)
-
+	cmd.Flags().StringVar(&bodyFile, "body-file", "", "plain text draft body file")
+	cmd.Flags().BoolVar(&replyAll, "reply-all", false, "include original To/Cc recipients, excluding the active account and primary reply recipients")
+	cmd.Flags().BoolVar(&replaceExisting, "replace-existing", false, "update the first existing draft in this thread and delete duplicate drafts")
+	cmd.Flags().StringSliceVar(&to, "to", nil, "override recipient address, repeatable or comma-separated")
+	cmd.Flags().StringSliceVar(&cc, "cc", nil, "override cc address, repeatable or comma-separated")
+	cmd.Flags().StringSliceVar(&bcc, "bcc", nil, "bcc address, repeatable or comma-separated")
 	return cmd
+}
+
+type draftFlags struct {
+	to         []string
+	cc         []string
+	bcc        []string
+	subject    string
+	bodyFile   string
+	threadID   string
+	inReplyTo  string
+	references string
+}
+
+func (f *draftFlags) addFlags(cmd *cobra.Command) {
+	cmd.Flags().StringSliceVar(&f.to, "to", nil, "recipient address, repeatable or comma-separated")
+	cmd.Flags().StringSliceVar(&f.cc, "cc", nil, "cc address, repeatable or comma-separated")
+	cmd.Flags().StringSliceVar(&f.bcc, "bcc", nil, "bcc address, repeatable or comma-separated")
+	cmd.Flags().StringVar(&f.subject, "subject", "", "draft subject")
+	cmd.Flags().StringVar(&f.bodyFile, "body-file", "", "plain text draft body file")
+	cmd.Flags().StringVar(&f.threadID, "thread-id", "", "Gmail thread ID for reply drafts")
+	cmd.Flags().StringVar(&f.inReplyTo, "in-reply-to", "", "Message-ID value for In-Reply-To")
+	cmd.Flags().StringVar(&f.references, "references", "", "References header value")
+}
+
+func (f draftFlags) toDraftOptions() (googlegmail.DraftOptions, error) {
+	if f.bodyFile == "" {
+		return googlegmail.DraftOptions{}, fmt.Errorf("--body-file is required")
+	}
+	body, err := os.ReadFile(f.bodyFile)
+	if err != nil {
+		return googlegmail.DraftOptions{}, fmt.Errorf("read body file: %w", err)
+	}
+	return googlegmail.DraftOptions{
+		To:         f.to,
+		Cc:         f.cc,
+		Bcc:        f.bcc,
+		Subject:    f.subject,
+		Body:       string(body),
+		ThreadID:   f.threadID,
+		InReplyTo:  f.inReplyTo,
+		References: f.references,
+	}, nil
+}
+
+func writeDraftInfo(cmd *cobra.Command, cfg *appConfig, draft *googlegmail.DraftInfo) error {
+	if cfg.jsonOutput {
+		return googlegmail.WriteJSON(cmd.OutOrStdout(), draft)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\t%s\n", draft.ID, draft.MessageID, draft.ThreadID, draft.Subject)
+	return nil
 }
 
 func newGmailClient(cmd *cobra.Command, cfg *appConfig) (*googlegmail.Client, context.Context, error) {

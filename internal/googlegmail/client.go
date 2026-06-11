@@ -86,6 +86,20 @@ type DraftInfo struct {
 	ID        string `json:"id"`
 	MessageID string `json:"message_id,omitempty"`
 	ThreadID  string `json:"thread_id,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	Snippet   string `json:"snippet,omitempty"`
+	To        string `json:"to,omitempty"`
+	Cc        string `json:"cc,omitempty"`
+}
+
+type ReplyDraftOptions struct {
+	ThreadID        string
+	Body            string
+	ReplyAll        bool
+	ReplaceExisting bool
+	To              []string
+	Cc              []string
+	Bcc             []string
 }
 
 type ingestState struct {
@@ -244,10 +258,224 @@ func (c *Client) CreateDraft(ctx context.Context, opts DraftOptions) (*DraftInfo
 	return info, nil
 }
 
+func (c *Client) CreateOrReplaceThreadDraft(ctx context.Context, opts DraftOptions) (*DraftInfo, error) {
+	threadID := strings.TrimSpace(opts.ThreadID)
+	if threadID == "" {
+		return nil, errors.New("thread id is required when replacing a thread draft")
+	}
+	drafts, err := c.draftsForThread(ctx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if len(drafts) == 0 {
+		return c.CreateDraft(ctx, opts)
+	}
+	for _, draft := range drafts[1:] {
+		if err := c.DeleteDraft(ctx, draft.ID); err != nil {
+			return nil, err
+		}
+	}
+	return c.UpdateDraft(ctx, drafts[0].ID, opts)
+}
+
+func (c *Client) UpdateDraft(ctx context.Context, id string, opts DraftOptions) (*DraftInfo, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("draft id is required")
+	}
+	raw, err := buildRawMessage(opts)
+	if err != nil {
+		return nil, err
+	}
+	message := &gmail.Message{Raw: raw}
+	if strings.TrimSpace(opts.ThreadID) != "" {
+		message.ThreadId = strings.TrimSpace(opts.ThreadID)
+	}
+	draft, err := doWithRetry(ctx, func() (*gmail.Draft, error) {
+		return c.service.Users.Drafts.Update("me", id, &gmail.Draft{Message: message}).Context(ctx).Do()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("update gmail draft %q: %w", id, err)
+	}
+	return draftInfo(draft), nil
+}
+
+func (c *Client) DeleteDraft(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("draft id is required")
+	}
+	_, err := doWithRetry(ctx, func() (*emptyResponse, error) {
+		err := c.service.Users.Drafts.Delete("me", id).Context(ctx).Do()
+		if err != nil {
+			return nil, err
+		}
+		return &emptyResponse{}, nil
+	})
+	if err != nil {
+		return fmt.Errorf("delete gmail draft %q: %w", id, err)
+	}
+	return nil
+}
+
+func (c *Client) GetDraft(ctx context.Context, id, format string) (*gmail.Draft, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("draft id is required")
+	}
+	if format == "" {
+		format = "metadata"
+	}
+	call := c.service.Users.Drafts.Get("me", id).Format(format).Context(ctx)
+	draft, err := doWithRetry(ctx, func() (*gmail.Draft, error) {
+		return call.Do()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get gmail draft %q: %w", id, err)
+	}
+	return draft, nil
+}
+
+func (c *Client) ListDrafts(ctx context.Context, maxResults int64) ([]DraftInfo, error) {
+	if maxResults <= 0 {
+		maxResults = 25
+	}
+	var out []DraftInfo
+	call := c.service.Users.Drafts.List("me").MaxResults(maxResults).Context(ctx)
+	for {
+		resp, err := doWithRetry(ctx, func() (*gmail.ListDraftsResponse, error) {
+			return call.Do()
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list gmail drafts: %w", err)
+		}
+		for _, draft := range resp.Drafts {
+			info := *draftInfo(draft)
+			if draft.Message != nil && info.Subject == "" && draft.Message.Id != "" {
+				full, err := c.GetDraft(ctx, draft.Id, "metadata")
+				if err == nil {
+					info = *draftInfo(full)
+				}
+			}
+			out = append(out, info)
+			if int64(len(out)) >= maxResults {
+				return out, nil
+			}
+		}
+		if resp.NextPageToken == "" {
+			return out, nil
+		}
+		call.PageToken(resp.NextPageToken)
+	}
+}
+
+func (c *Client) CreateReplyDraft(ctx context.Context, opts ReplyDraftOptions) (*DraftInfo, error) {
+	threadID := strings.TrimSpace(opts.ThreadID)
+	if threadID == "" {
+		return nil, errors.New("thread id is required")
+	}
+	thread, err := c.GetThread(ctx, threadID, "metadata")
+	if err != nil {
+		return nil, err
+	}
+	replyToMessage := latestNonDraftMessage(thread)
+	if replyToMessage == nil {
+		return nil, fmt.Errorf("thread %q has no non-draft messages to reply to", threadID)
+	}
+	draftOpts, err := c.replyDraftOptions(ctx, replyToMessage, opts)
+	if err != nil {
+		return nil, err
+	}
+	if opts.ReplaceExisting {
+		drafts, err := c.draftsForThread(ctx, threadID)
+		if err != nil {
+			return nil, err
+		}
+		if len(drafts) > 0 {
+			for _, draft := range drafts[1:] {
+				if err := c.DeleteDraft(ctx, draft.ID); err != nil {
+					return nil, err
+				}
+			}
+			return c.UpdateDraft(ctx, drafts[0].ID, draftOpts)
+		}
+	}
+	return c.CreateDraft(ctx, draftOpts)
+}
+
+func (c *Client) draftsForThread(ctx context.Context, threadID string) ([]DraftInfo, error) {
+	var out []DraftInfo
+	call := c.service.Users.Drafts.List("me").MaxResults(100).Context(ctx)
+	for {
+		resp, err := doWithRetry(ctx, func() (*gmail.ListDraftsResponse, error) {
+			return call.Do()
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list gmail drafts: %w", err)
+		}
+		for _, draft := range resp.Drafts {
+			if draft.Message != nil && draft.Message.ThreadId == threadID {
+				out = append(out, *draftInfo(draft))
+			}
+		}
+		if resp.NextPageToken == "" {
+			return out, nil
+		}
+		call.PageToken(resp.NextPageToken)
+	}
+}
+
+func (c *Client) replyDraftOptions(ctx context.Context, message *gmail.Message, opts ReplyDraftOptions) (DraftOptions, error) {
+	headers := headerMap(message)
+	profile, err := c.service.Users.GetProfile("me").Context(ctx).Do()
+	if err != nil {
+		return DraftOptions{}, fmt.Errorf("get gmail profile: %w", err)
+	}
+	self := strings.ToLower(strings.TrimSpace(profile.EmailAddress))
+
+	to := opts.To
+	cc := opts.Cc
+	if len(to) == 0 {
+		to = addressesForReply(headers)
+	}
+	if opts.ReplyAll && len(opts.Cc) == 0 {
+		cc = replyAllCc(headers, self, to)
+	}
+
+	subject := headers["Subject"]
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(subject)), "re:") {
+		subject = "Re: " + subject
+	}
+	references := strings.TrimSpace(headers["References"])
+	messageID := strings.TrimSpace(headers["Message-ID"])
+	if messageID != "" && !strings.Contains(references, messageID) {
+		if references != "" {
+			references += " "
+		}
+		references += messageID
+	}
+	return DraftOptions{
+		To:         to,
+		Cc:         cc,
+		Bcc:        opts.Bcc,
+		Subject:    subject,
+		Body:       opts.Body,
+		ThreadID:   opts.ThreadID,
+		InReplyTo:  messageID,
+		References: references,
+	}, nil
+}
+
+type emptyResponse struct{}
+
 func WriteJSON(w io.Writer, value any) error {
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(value)
+}
+
+func WriteJSONFile(path string, value any) error {
+	return writePrettyJSON(path, value)
 }
 
 func buildRawMessage(opts DraftOptions) (string, error) {
@@ -311,6 +539,94 @@ func normalizeAddressList(values []string) (string, error) {
 		}
 	}
 	return strings.Join(addresses, ", "), nil
+}
+
+func draftInfo(draft *gmail.Draft) *DraftInfo {
+	if draft == nil {
+		return &DraftInfo{}
+	}
+	info := &DraftInfo{ID: draft.Id}
+	if draft.Message != nil {
+		info.MessageID = draft.Message.Id
+		info.ThreadID = draft.Message.ThreadId
+		info.Snippet = draft.Message.Snippet
+		headers := headerMap(draft.Message)
+		info.Subject = headers["Subject"]
+		info.To = headers["To"]
+		info.Cc = headers["Cc"]
+	}
+	return info
+}
+
+func latestNonDraftMessage(thread *gmail.Thread) *gmail.Message {
+	if thread == nil {
+		return nil
+	}
+	var latest *gmail.Message
+	for _, message := range thread.Messages {
+		if hasLabel(message, "DRAFT") {
+			continue
+		}
+		if latest == nil || message.InternalDate > latest.InternalDate {
+			latest = message
+		}
+	}
+	return latest
+}
+
+func hasLabel(message *gmail.Message, label string) bool {
+	for _, value := range message.LabelIds {
+		if value == label {
+			return true
+		}
+	}
+	return false
+}
+
+func addressesForReply(headers map[string]string) []string {
+	if value := strings.TrimSpace(headers["Reply-To"]); value != "" {
+		return addressesAsStrings(parseAddressList(value))
+	}
+	return addressesAsStrings(parseAddressList(headers["From"]))
+}
+
+func replyAllCc(headers map[string]string, self string, primary []string) []string {
+	exclude := map[string]struct{}{}
+	if self != "" {
+		exclude[self] = struct{}{}
+	}
+	for _, value := range primary {
+		for _, address := range parseAddressList(value) {
+			exclude[strings.ToLower(address.Address)] = struct{}{}
+		}
+	}
+	var out []string
+	seen := make(map[string]struct{})
+	for _, header := range []string{"To", "Cc"} {
+		for _, address := range parseAddressList(headers[header]) {
+			email := strings.ToLower(address.Address)
+			if _, skip := exclude[email]; skip {
+				continue
+			}
+			if _, ok := seen[email]; ok {
+				continue
+			}
+			seen[email] = struct{}{}
+			out = append(out, address.String())
+		}
+	}
+	return out
+}
+
+func addressesAsStrings(addresses []*mail.Address) []string {
+	out := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		if address == nil {
+			continue
+		}
+		out = append(out, address.String())
+	}
+	return out
 }
 
 func WriteMessageFile(path string, message *gmail.Message, format string) error {
@@ -859,7 +1175,7 @@ func sanitizePart(part *gmail.MessagePart) *gmail.MessagePart {
 }
 
 func metadataHeaders() []string {
-	return []string{"From", "To", "Cc", "Bcc", "Reply-To", "Sender", "Subject", "Date"}
+	return []string{"From", "To", "Cc", "Bcc", "Reply-To", "Sender", "Subject", "Date", "Message-ID", "References"}
 }
 
 func walkParts(messageID string, part *gmail.MessagePart, attachments *[]AttachmentInfo) {
