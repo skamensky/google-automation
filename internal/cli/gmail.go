@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"mime"
 	"os"
+	"path/filepath"
 
 	"github.com/skamensky/google-automation/internal/googleaccounts"
 	"github.com/skamensky/google-automation/internal/googlegmail"
@@ -23,8 +25,38 @@ func newGmailCommand(cfg *appConfig) *cobra.Command {
 	cmd.AddCommand(newGmailGetThreadCommand(cfg))
 	cmd.AddCommand(newGmailAttachmentsCommand(cfg))
 	cmd.AddCommand(newGmailAddressesCommand(cfg))
+	cmd.AddCommand(newGmailSendCommand(cfg))
 	cmd.AddCommand(newGmailDraftsCommand(cfg))
 
+	return cmd
+}
+
+func newGmailSendCommand(cfg *appConfig) *cobra.Command {
+	opts := draftFlags{}
+	cmd := &cobra.Command{
+		Use:   "send",
+		Short: "Send a Gmail message immediately",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			messageOpts, err := opts.toDraftOptions()
+			if err != nil {
+				return err
+			}
+			client, ctx, err := newGmailClient(cmd, cfg)
+			if err != nil {
+				return err
+			}
+			sent, err := client.SendMessage(ctx, messageOpts)
+			if err != nil {
+				return err
+			}
+			if cfg.jsonOutput {
+				return googlegmail.WriteJSON(cmd.OutOrStdout(), sent)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", sent.ID, sent.ThreadID)
+			return nil
+		},
+	}
+	opts.addFlags(cmd)
 	return cmd
 }
 
@@ -439,14 +471,16 @@ func newGmailDraftsReplyCommand(cfg *appConfig) *cobra.Command {
 }
 
 type draftFlags struct {
-	to         []string
-	cc         []string
-	bcc        []string
-	subject    string
-	bodyFile   string
-	threadID   string
-	inReplyTo  string
-	references string
+	to          []string
+	cc          []string
+	bcc         []string
+	subject     string
+	bodyFile    string
+	html        bool
+	threadID    string
+	inReplyTo   string
+	references  string
+	attachments []string
 }
 
 func (f *draftFlags) addFlags(cmd *cobra.Command) {
@@ -454,10 +488,12 @@ func (f *draftFlags) addFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSliceVar(&f.cc, "cc", nil, "cc address, repeatable or comma-separated")
 	cmd.Flags().StringSliceVar(&f.bcc, "bcc", nil, "bcc address, repeatable or comma-separated")
 	cmd.Flags().StringVar(&f.subject, "subject", "", "draft subject")
-	cmd.Flags().StringVar(&f.bodyFile, "body-file", "", "plain text draft body file")
+	cmd.Flags().StringVar(&f.bodyFile, "body-file", "", "message body file")
+	cmd.Flags().BoolVar(&f.html, "html", false, "treat --body-file as HTML")
 	cmd.Flags().StringVar(&f.threadID, "thread-id", "", "Gmail thread ID for reply drafts")
 	cmd.Flags().StringVar(&f.inReplyTo, "in-reply-to", "", "Message-ID value for In-Reply-To")
 	cmd.Flags().StringVar(&f.references, "references", "", "References header value")
+	cmd.Flags().StringSliceVar(&f.attachments, "attachment", nil, "file to attach, repeatable or comma-separated")
 }
 
 func (f draftFlags) toDraftOptions() (googlegmail.DraftOptions, error) {
@@ -468,15 +504,33 @@ func (f draftFlags) toDraftOptions() (googlegmail.DraftOptions, error) {
 	if err != nil {
 		return googlegmail.DraftOptions{}, fmt.Errorf("read body file: %w", err)
 	}
+	attachments := make([]googlegmail.Attachment, 0, len(f.attachments))
+	for _, path := range f.attachments {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return googlegmail.DraftOptions{}, fmt.Errorf("read attachment %q: %w", path, err)
+		}
+		mimeType := mime.TypeByExtension(filepath.Ext(path))
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		attachments = append(attachments, googlegmail.Attachment{
+			Filename: filepath.Base(path),
+			MIMEType: mimeType,
+			Data:     data,
+		})
+	}
 	return googlegmail.DraftOptions{
-		To:         f.to,
-		Cc:         f.cc,
-		Bcc:        f.bcc,
-		Subject:    f.subject,
-		Body:       string(body),
-		ThreadID:   f.threadID,
-		InReplyTo:  f.inReplyTo,
-		References: f.references,
+		To:          f.to,
+		Cc:          f.cc,
+		Bcc:         f.bcc,
+		Subject:     f.subject,
+		Body:        string(body),
+		HTML:        f.html,
+		ThreadID:    f.threadID,
+		InReplyTo:   f.inReplyTo,
+		References:  f.references,
+		Attachments: attachments,
 	}, nil
 }
 

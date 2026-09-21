@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/mail"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"sort"
@@ -72,14 +75,22 @@ type AddressExportOptions struct {
 }
 
 type DraftOptions struct {
-	To         []string
-	Cc         []string
-	Bcc        []string
-	Subject    string
-	Body       string
-	ThreadID   string
-	InReplyTo  string
-	References string
+	To          []string
+	Cc          []string
+	Bcc         []string
+	Subject     string
+	Body        string
+	HTML        bool
+	ThreadID    string
+	InReplyTo   string
+	References  string
+	Attachments []Attachment
+}
+
+type Attachment struct {
+	Filename string
+	MIMEType string
+	Data     []byte
 }
 
 type DraftInfo struct {
@@ -90,6 +101,12 @@ type DraftInfo struct {
 	Snippet   string `json:"snippet,omitempty"`
 	To        string `json:"to,omitempty"`
 	Cc        string `json:"cc,omitempty"`
+}
+
+type SentMessageInfo struct {
+	ID       string   `json:"id"`
+	ThreadID string   `json:"thread_id,omitempty"`
+	LabelIDs []string `json:"label_ids,omitempty"`
 }
 
 type ReplyDraftOptions struct {
@@ -218,7 +235,7 @@ func (c *Client) DownloadAttachments(ctx context.Context, messageID, outputDir s
 		if err != nil {
 			return nil, fmt.Errorf("download attachment %q: %w", attachment.AttachmentID, err)
 		}
-		data, err := base64.RawURLEncoding.DecodeString(resp.Data)
+		data, err := decodeWebSafeBase64(resp.Data)
 		if err != nil {
 			return nil, fmt.Errorf("decode attachment %q: %w", attachment.AttachmentID, err)
 		}
@@ -233,6 +250,16 @@ func (c *Client) DownloadAttachments(ctx context.Context, messageID, outputDir s
 		paths = append(paths, path)
 	}
 	return paths, nil
+}
+
+// Gmail documents attachment bodies as unpadded base64url, but the API can
+// return padded base64url as well. Accept both forms without weakening the
+// alphabet to standard base64, whose '+' and '/' are not valid here.
+func decodeWebSafeBase64(value string) ([]byte, error) {
+	if decoded, err := base64.RawURLEncoding.DecodeString(value); err == nil {
+		return decoded, nil
+	}
+	return base64.URLEncoding.DecodeString(value)
 }
 
 func (c *Client) CreateDraft(ctx context.Context, opts DraftOptions) (*DraftInfo, error) {
@@ -256,6 +283,27 @@ func (c *Client) CreateDraft(ctx context.Context, opts DraftOptions) (*DraftInfo
 		info.ThreadID = draft.Message.ThreadId
 	}
 	return info, nil
+}
+
+// SendMessage sends a fully composed Gmail message immediately. It shares the
+// same validation and MIME construction as drafts so callers cannot accidentally
+// bypass recipient or subject validation.
+func (c *Client) SendMessage(ctx context.Context, opts DraftOptions) (*SentMessageInfo, error) {
+	raw, err := buildRawMessage(opts)
+	if err != nil {
+		return nil, err
+	}
+	message := &gmail.Message{Raw: raw}
+	if strings.TrimSpace(opts.ThreadID) != "" {
+		message.ThreadId = strings.TrimSpace(opts.ThreadID)
+	}
+	sent, err := doWithRetry(ctx, func() (*gmail.Message, error) {
+		return c.service.Users.Messages.Send("me", message).Context(ctx).Do()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("send gmail message: %w", err)
+	}
+	return &SentMessageInfo{ID: sent.Id, ThreadID: sent.ThreadId, LabelIDs: sent.LabelIds}, nil
 }
 
 func (c *Client) CreateOrReplaceThreadDraft(ctx context.Context, opts DraftOptions) (*DraftInfo, error) {
@@ -509,11 +557,62 @@ func buildRawMessage(opts DraftOptions) (string, error) {
 	writeHeader("To", to)
 	writeHeader("Cc", cc)
 	writeHeader("Bcc", bcc)
-	writeHeader("Subject", subject)
+	writeHeader("Subject", mime.QEncoding.Encode("UTF-8", subject))
 	writeHeader("In-Reply-To", opts.InReplyTo)
 	writeHeader("References", opts.References)
 	writeHeader("MIME-Version", "1.0")
-	writeHeader("Content-Type", `text/plain; charset="UTF-8"`)
+	contentType := `text/plain; charset="UTF-8"`
+	if opts.HTML {
+		contentType = `text/html; charset="UTF-8"`
+	}
+	if len(opts.Attachments) > 0 {
+		multipartWriter := multipart.NewWriter(&buf)
+		writeHeader("Content-Type", fmt.Sprintf(`multipart/mixed; boundary=%q`, multipartWriter.Boundary()))
+		buf.WriteString("\r\n")
+
+		bodyHeader := make(textproto.MIMEHeader)
+		bodyHeader.Set("Content-Type", contentType)
+		bodyHeader.Set("Content-Transfer-Encoding", "8bit")
+		bodyPart, err := multipartWriter.CreatePart(bodyHeader)
+		if err != nil {
+			return "", fmt.Errorf("create message body part: %w", err)
+		}
+		body := strings.ReplaceAll(opts.Body, "\r\n", "\n")
+		body = strings.ReplaceAll(body, "\r", "\n")
+		if _, err := bodyPart.Write([]byte(strings.ReplaceAll(body, "\n", "\r\n"))); err != nil {
+			return "", fmt.Errorf("write message body part: %w", err)
+		}
+
+		for _, attachment := range opts.Attachments {
+			filename := strings.TrimSpace(attachment.Filename)
+			if filename == "" {
+				return "", errors.New("attachment filename is required")
+			}
+			attachmentType := strings.TrimSpace(attachment.MIMEType)
+			if attachmentType == "" {
+				attachmentType = "application/octet-stream"
+			}
+			partHeader := make(textproto.MIMEHeader)
+			partHeader.Set("Content-Type", mime.FormatMediaType(attachmentType, map[string]string{"name": filename}))
+			partHeader.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": filename}))
+			partHeader.Set("Content-Transfer-Encoding", "base64")
+			part, err := multipartWriter.CreatePart(partHeader)
+			if err != nil {
+				return "", fmt.Errorf("create attachment part %q: %w", filename, err)
+			}
+			encoded := base64.StdEncoding.EncodeToString(attachment.Data)
+			for len(encoded) > 76 {
+				fmt.Fprintf(part, "%s\r\n", encoded[:76])
+				encoded = encoded[76:]
+			}
+			fmt.Fprint(part, encoded)
+		}
+		if err := multipartWriter.Close(); err != nil {
+			return "", fmt.Errorf("close multipart message: %w", err)
+		}
+		return base64.RawURLEncoding.EncodeToString(buf.Bytes()), nil
+	}
+	writeHeader("Content-Type", contentType)
 	writeHeader("Content-Transfer-Encoding", "8bit")
 	buf.WriteString("\r\n")
 	body := strings.ReplaceAll(opts.Body, "\r\n", "\n")
