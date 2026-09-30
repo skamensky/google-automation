@@ -29,7 +29,7 @@ const (
 	GoogleSlideMimeType   = "application/vnd.google-apps.presentation"
 	GoogleDrawingMimeType = "application/vnd.google-apps.drawing"
 
-	defaultFields = "id,name,mimeType,size,parents,webViewLink,webContentLink,owners(emailAddress,displayName),createdTime,modifiedTime,trashed,capabilities"
+	defaultFields = "id,name,mimeType,size,md5Checksum,sha256Checksum,version,parents,webViewLink,webContentLink,owners(emailAddress,displayName),createdTime,modifiedTime,trashed,capabilities"
 )
 
 type Config struct {

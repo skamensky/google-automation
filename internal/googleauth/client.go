@@ -36,6 +36,19 @@ func Login(ctx context.Context, cfg Config) (*oauth2.Token, error) {
 }
 
 func NewClient(ctx context.Context, cfg Config) (*http.Client, error) {
+	if path := os.Getenv("GOOGLE_AUTOMATION_ACCESS_TOKEN_FILE"); path != "" {
+		token, err := tokenFromFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if token.RefreshToken != "" {
+			return nil, errors.New("temporary token must not contain a refresh token")
+		}
+		if !token.Valid() {
+			return nil, errors.New("temporary access token expired; renew it on the trusted host")
+		}
+		return oauth2.NewClient(ctx, oauth2.StaticTokenSource(token)), nil
+	}
 	token, oauthConfig, err := tokenAndConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -335,4 +348,41 @@ func tokenNeedsSave(oldToken, newToken *oauth2.Token) bool {
 		oldToken.RefreshToken != newToken.RefreshToken ||
 		!oldToken.Expiry.Equal(newToken.Expiry) ||
 		oldToken.TokenType != newToken.TokenType
+}
+
+// ExportAccessToken writes a short-lived token without exporting refresh credentials.
+func ExportAccessToken(ctx context.Context, cfg Config, output string) error {
+	if output == "" {
+		return errors.New("output path is required")
+	}
+	token, config, err := tokenAndConfig(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	source := &persistingTokenSource{source: config.TokenSource(ctx, token), path: cfg.TokenFile, last: token}
+	fresh, err := source.Token()
+	if err != nil {
+		return err
+	}
+	limited := &oauth2.Token{AccessToken: fresh.AccessToken, TokenType: fresh.TokenType, Expiry: fresh.Expiry}
+	if err := os.MkdirAll(filepath.Dir(output), 0700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(output), ".access-token-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if err := json.NewEncoder(tmp).Encode(limited); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), output)
 }

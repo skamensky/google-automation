@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/skamensky/google-automation/internal/googleaccounts"
+	"github.com/skamensky/google-automation/internal/googleauth"
 	"github.com/spf13/cobra"
 )
 
@@ -37,6 +38,14 @@ func newAuthCommand(cfg *appConfig) *cobra.Command {
 		},
 	})
 	cmd.AddCommand(newAuthScopesCommand())
+	var accessOutput string
+	access := &cobra.Command{Use: "export-access-token --output PATH", Short: "Write an ephemeral access token without refresh credentials", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return googleauth.ExportAccessToken(commandContext(cmd), googleauth.Config{CredentialsFile: cfg.credentialsFile, TokenFile: cfg.tokenFile, NoBrowser: cfg.noBrowser}, accessOutput)
+		}}
+	access.Flags().StringVar(&accessOutput, "output", "", "private temporary token file")
+	_ = access.MarkFlagRequired("output")
+	cmd.AddCommand(access)
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "list",
