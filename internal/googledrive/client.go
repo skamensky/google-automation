@@ -29,7 +29,7 @@ const (
 	GoogleSlideMimeType   = "application/vnd.google-apps.presentation"
 	GoogleDrawingMimeType = "application/vnd.google-apps.drawing"
 
-	defaultFields = "id,name,mimeType,size,md5Checksum,sha256Checksum,version,parents,webViewLink,webContentLink,owners(emailAddress,displayName),createdTime,modifiedTime,trashed,capabilities"
+	defaultFields = "id,name,mimeType,size,md5Checksum,sha256Checksum,version,parents,webViewLink,webContentLink,owners(emailAddress,displayName),createdTime,modifiedTime,trashed,capabilities,description,shortcutDetails"
 )
 
 type Config struct {
@@ -45,8 +45,9 @@ type Client struct {
 }
 
 type FileList struct {
-	Files         []*drive.File `json:"files"`
-	NextPageToken string        `json:"nextPageToken,omitempty"`
+	Files            []*drive.File `json:"files"`
+	NextPageToken    string        `json:"nextPageToken,omitempty"`
+	IncompleteSearch bool          `json:"incompleteSearch"`
 }
 
 type SearchOptions struct {
@@ -176,7 +177,7 @@ func (c *Client) Search(ctx context.Context, opts SearchOptions) (FileList, erro
 	if err != nil {
 		return FileList{}, fmt.Errorf("search drive files: %w", err)
 	}
-	result := FileList{Files: resp.Files, NextPageToken: resp.NextPageToken}
+	result := FileList{Files: resp.Files, NextPageToken: resp.NextPageToken, IncompleteSearch: resp.IncompleteSearch}
 	if err := c.cache.SetJSON(ctx, "drive", cacheKey, result); err != nil {
 		return FileList{}, err
 	}

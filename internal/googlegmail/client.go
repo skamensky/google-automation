@@ -3,6 +3,7 @@ package googlegmail
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -57,6 +58,7 @@ type AttachmentInfo struct {
 	Filename     string `json:"filename"`
 	MimeType     string `json:"mime_type"`
 	Size         int64  `json:"size"`
+	InlineData   string `json:"-"`
 }
 
 type AddressInteraction struct {
@@ -150,25 +152,41 @@ func (c *Client) ListMessages(ctx context.Context, query string, labels []string
 	if limit <= 0 {
 		limit = 25
 	}
-	call := c.service.Users.Messages.List("me").MaxResults(limit).IncludeSpamTrash(includeSpamTrash).Context(ctx)
-	if query != "" {
-		call.Q(query)
-	}
-	for _, label := range labels {
-		if strings.TrimSpace(label) != "" {
-			call.LabelIds(strings.TrimSpace(label))
+	items := []MessageListItem{}
+	page := ""
+	for int64(len(items)) < limit {
+		pageSize := limit - int64(len(items))
+		if pageSize > 500 {
+			pageSize = 500
 		}
+		call := c.service.Users.Messages.List("me").MaxResults(pageSize).IncludeSpamTrash(includeSpamTrash).Context(ctx)
+		if query != "" {
+			call.Q(query)
+		}
+		if page != "" {
+			call.PageToken(page)
+		}
+		for _, label := range labels {
+			if strings.TrimSpace(label) != "" {
+				call.LabelIds(strings.TrimSpace(label))
+			}
+		}
+		resp, err := doWithRetry(ctx, func() (*gmail.ListMessagesResponse, error) { return call.Do() })
+		if err != nil {
+			return nil, fmt.Errorf("list gmail messages: %w", err)
+		}
+		for _, message := range resp.Messages {
+			items = append(items, MessageListItem{ID: message.Id, ThreadID: message.ThreadId})
+		}
+		if resp.NextPageToken == "" {
+			break
+		}
+		if resp.NextPageToken == page {
+			return nil, errors.New("Gmail repeated page token")
+		}
+		page = resp.NextPageToken
 	}
-	resp, err := doWithRetry(ctx, func() (*gmail.ListMessagesResponse, error) {
-		return call.Do()
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list gmail messages: %w", err)
-	}
-	items := make([]MessageListItem, 0, len(resp.Messages))
-	for _, message := range resp.Messages {
-		items = append(items, MessageListItem{ID: message.Id, ThreadID: message.ThreadId})
-	}
+
 	return items, nil
 }
 
@@ -228,22 +246,33 @@ func (c *Client) DownloadAttachments(ctx context.Context, messageID, outputDir s
 	}
 	var paths []string
 	for _, attachment := range attachments {
-		call := c.service.Users.Messages.Attachments.Get("me", messageID, attachment.AttachmentID).Context(ctx)
-		resp, err := doWithRetry(ctx, func() (*gmail.MessagePartBody, error) {
-			return call.Do()
-		})
-		if err != nil {
-			return nil, fmt.Errorf("download attachment %q: %w", attachment.AttachmentID, err)
+		encoded := attachment.InlineData
+		if attachment.AttachmentID != "" {
+			call := c.service.Users.Messages.Attachments.Get("me", messageID, attachment.AttachmentID).Context(ctx)
+			resp, e := doWithRetry(ctx, func() (*gmail.MessagePartBody, error) { return call.Do() })
+			if e != nil {
+				return nil, fmt.Errorf("download attachment: %w", e)
+			}
+			encoded = resp.Data
 		}
-		data, err := decodeWebSafeBase64(resp.Data)
+		data, err := decodeWebSafeBase64(encoded)
 		if err != nil {
-			return nil, fmt.Errorf("decode attachment %q: %w", attachment.AttachmentID, err)
+			return nil, fmt.Errorf("decode attachment: %w", err)
 		}
+
 		name := safeFilename(attachment.Filename)
 		if name == "" {
-			name = attachment.AttachmentID
+			idHash := sha256.Sum256([]byte(attachment.AttachmentID))
+			name = fmt.Sprintf("attachment-%x", idHash[:8])
 		}
 		path := filepath.Join(outputDir, name)
+		for n := 2; ; n++ {
+			if _, e := os.Stat(path); os.IsNotExist(e) {
+				break
+			}
+			ext := filepath.Ext(name)
+			path = filepath.Join(outputDir, strings.TrimSuffix(name, ext)+fmt.Sprintf(" - part %s version %d", attachment.PartID, n)+ext)
+		}
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			return nil, fmt.Errorf("write attachment %q: %w", path, err)
 		}
@@ -1281,7 +1310,7 @@ func walkParts(messageID string, part *gmail.MessagePart, attachments *[]Attachm
 	if part == nil {
 		return
 	}
-	if part.Body != nil && part.Body.AttachmentId != "" {
+	if part.Body != nil && (part.Body.AttachmentId != "" || part.Filename != "") {
 		*attachments = append(*attachments, AttachmentInfo{
 			MessageID:    messageID,
 			PartID:       part.PartId,
@@ -1289,6 +1318,7 @@ func walkParts(messageID string, part *gmail.MessagePart, attachments *[]Attachm
 			Filename:     part.Filename,
 			MimeType:     part.MimeType,
 			Size:         part.Body.Size,
+			InlineData:   part.Body.Data,
 		})
 	}
 	for _, child := range part.Parts {
@@ -1324,7 +1354,11 @@ func sortedSet(values map[string]struct{}) []string {
 }
 
 func safeFilename(value string) string {
-	value = filepath.Base(strings.TrimSpace(value))
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = filepath.Base(value)
 	value = strings.Map(func(r rune) rune {
 		switch r {
 		case '/', '\\', ':', 0:

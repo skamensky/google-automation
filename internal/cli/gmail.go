@@ -20,6 +20,8 @@ func newGmailCommand(cfg *appConfig) *cobra.Command {
 	}
 
 	cmd.AddCommand(newGmailSearchCommand(cfg))
+	cmd.AddCommand(newGmailExportCommand(cfg))
+	cmd.AddCommand(newGmailExportIDsCommand(cfg))
 	cmd.AddCommand(newGmailListCommand(cfg))
 	cmd.AddCommand(newGmailGetMessageCommand(cfg))
 	cmd.AddCommand(newGmailGetThreadCommand(cfg))
