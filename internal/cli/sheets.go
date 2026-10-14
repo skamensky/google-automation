@@ -12,6 +12,7 @@ func newSheetsCommand(cfg *appConfig) *cobra.Command {
 	cmd := &cobra.Command{Use: "sheets", Short: "Manage Google Sheets"}
 	cmd.AddCommand(newSheetsCreateCommand(cfg))
 	cmd.AddCommand(newSheetsGetCommand(cfg))
+	cmd.AddCommand(newSheetsGridCommand(cfg))
 	cmd.AddCommand(newSheetsExportCommand(cfg))
 	cmd.AddCommand(newSheetsSearchCommand(cfg))
 	cmd.AddCommand(newSheetsBatchUpdateCommand(cfg))
