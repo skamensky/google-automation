@@ -1,0 +1,16 @@
+name: Nix CLI build
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+      - run: nix flake check
+      - run: nix run . -- --help
+      - name: Evaluate ARM package
+        run: nix eval --raw .#packages.aarch64-linux.default.drvPath

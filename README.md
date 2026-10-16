@@ -141,6 +141,35 @@ google-automation --no-cache contacts search shmuel
 go build ./...
 ```
 
+## Nix build and development
+
+This project owns an independent `flake.nix` and `flake.lock`, separate from the
+Spawnkit machine configuration. Linux x86_64 and aarch64 outputs are declared;
+x86_64 is build-tested. No OAuth login or credentials are needed to build/test.
+
+```bash
+nix build                   # result/bin/google-automation
+nix run . -- --help
+nix flake check             # builds the CLI and runs go test ./...
+nix develop
+# inside the development shell:
+go test ./...
+go run . --help
+```
+
+The SQLite cache uses CGO, so the package includes a matching Nix C toolchain.
+The development shell uses `mkShellNoCC` and wraps `go` to select that compiler
+only inside the Go subprocess. It does not export a global `CC` or
+`LD_LIBRARY_PATH` and does not supply Python or Node; mise may own those runtimes.
+Arbitrary Nix native libraries still must not be injected into mise Python/Node.
+For the packaged binary, Nix owns its complete native dependency closure.
+
+The source and vendored module hash are pinned by the repository and lockfile.
+When changing `go.mod`/`go.sum`, update `vendorHash` deliberately, run the checks,
+and commit the hash and lock changes. Update the compiler/tool packages through
+this project's Nixpkgs pin. Runtime credentials/cache remain in their existing
+private user locations outside Git and the Nix store.
+
 ## Examples
 
 ```bash

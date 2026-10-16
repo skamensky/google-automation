@@ -5,3 +5,7 @@ config/cache/
 google-automation
 dist/
 coverage.out
+
+/result
+/result-*
+/.direnv/
