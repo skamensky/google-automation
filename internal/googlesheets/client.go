@@ -17,6 +17,8 @@ import (
 	sheets "google.golang.org/api/sheets/v4"
 )
 
+const BigQueryReadonlyScope = "https://www.googleapis.com/auth/bigquery.readonly"
+
 type Config struct {
 	CredentialsFile string
 	TokenFile       string
@@ -31,7 +33,8 @@ type Client struct {
 }
 
 func Scopes() []string {
-	return []string{sheets.SpreadsheetsScope, drive.DriveScope}
+	// BigQuery-connected data-source refreshes need the additional read-only scope.
+	return []string{sheets.SpreadsheetsScope, drive.DriveScope, BigQueryReadonlyScope}
 }
 
 func NewClient(ctx context.Context, cfg Config) (*Client, error) {

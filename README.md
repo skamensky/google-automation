@@ -106,6 +106,21 @@ Multiple Google account logins are stored under:
 
 The active account is used by Google API commands unless `--token-file` is provided.
 
+Login includes BigQuery read-only access for refreshing BigQuery-connected Sheets.
+Existing accounts must run `auth login` again and approve the added permission;
+refreshing an old access token does not grant a new OAuth scope. No BigQuery write
+or administration permission is requested.
+
+To refresh all existing connected-data objects, save this as `refresh.json`:
+
+```json
+{"requests":[{"refreshDataSource":{"isAll":true,"force":true}}]}
+```
+
+Then run `google-automation sheets batch-update SPREADSHEET_ID --request-file refresh.json`.
+The request starts an asynchronous refresh; read the affected cells afterward to
+verify that refreshed results are visible.
+
 ## Security
 
 Users must provide their own Google OAuth client credentials. Do not commit OAuth

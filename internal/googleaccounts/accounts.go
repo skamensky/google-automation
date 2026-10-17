@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/skamensky/google-automation/internal/googleauth"
+	"github.com/skamensky/google-automation/internal/googlesheets"
 	"golang.org/x/oauth2"
 	calendar "google.golang.org/api/calendar/v3"
 	docs "google.golang.org/api/docs/v1"
@@ -186,6 +187,8 @@ func TokenPath(accountsDir, email string) string {
 
 func Scopes() []string {
 	scopes := []string{
+		// Connected Sheets refreshes require this in addition to spreadsheet access.
+		googlesheets.BigQueryReadonlyScope,
 		calendar.CalendarScope,
 		docs.DocumentsScope,
 		drive.DriveScope,
