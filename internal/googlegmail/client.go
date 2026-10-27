@@ -196,9 +196,7 @@ func (c *Client) GetMessage(ctx context.Context, id, format string) (*gmail.Mess
 	}
 	call := c.service.Users.Messages.Get("me", id).Format(format).Context(ctx)
 	if format == "metadata" {
-		for _, header := range metadataHeaders() {
-			call.MetadataHeaders(header)
-		}
+		call.MetadataHeaders(metadataHeaders()...)
 	}
 	message, err := doWithRetry(ctx, func() (*gmail.Message, error) {
 		return call.Do()
@@ -1303,7 +1301,7 @@ func sanitizePart(part *gmail.MessagePart) *gmail.MessagePart {
 }
 
 func metadataHeaders() []string {
-	return []string{"From", "To", "Cc", "Bcc", "Reply-To", "Sender", "Subject", "Date", "Message-ID", "References"}
+	return []string{"From", "To", "Cc", "Bcc", "Reply-To", "Sender", "Subject", "Date", "Message-ID", "In-Reply-To", "References"}
 }
 
 func walkParts(messageID string, part *gmail.MessagePart, attachments *[]AttachmentInfo) {

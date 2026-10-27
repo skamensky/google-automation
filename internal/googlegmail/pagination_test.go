@@ -47,3 +47,24 @@ func TestWalkPartsIncludesInlineNamedAttachments(t *testing.T) {
 		t.Fatal("inline attachment lost")
 	}
 }
+
+func TestGetMessageMetadataRequestsEveryHeader(t *testing.T) {
+	var got []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query()["metadataHeaders"]
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"m","threadId":"t"}`)
+	}))
+	defer server.Close()
+	svc, e := gmail.NewService(context.Background(), option.WithEndpoint(server.URL+"/"), option.WithoutAuthentication())
+	if e != nil {
+		t.Fatal(e)
+	}
+	c := &Client{service: svc}
+	if _, e := c.GetMessage(context.Background(), "m", "metadata"); e != nil {
+		t.Fatal(e)
+	}
+	if len(got) != len(metadataHeaders()) {
+		t.Fatalf("metadataHeaders = %v, want %v", got, metadataHeaders())
+	}
+}
